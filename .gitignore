@@ -1,0 +1,14 @@
+dist/
+out/
+out-stock/
+src/
+toolchain/
+toolchain21/
+dl/
+work/
+tmp/
+sagit-backup/
+*.img
+*.zip
+*.o
+*.ko
