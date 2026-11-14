@@ -2,14 +2,14 @@ name: build-venus-kernel
 
 # 小米 11（venus）LineageOS 23.2 / 5.4.302 内核构建
 #
-# 关键点（v4）：
-#   * LineageOS / AOSP 的 kernel build.config 里会传 `-D__ANDROID_COMMON_KERNEL__`，
-#     官方内核因此导出/启用了一批 ACK 专有代码；我们自己 make 时漏掉这个宏，
-#     厂商模块可能因为找不到符号而加载失败 → 卡在开机 logo。v4 补上。
-#   * 其余仍保持：原厂 config、LOCALVERSION 对齐、不带 dirty 的 "+"。
+# v5 关键修正（静态分析 vendor_boot 里的厂商模块得到的结论）：
+#   厂商模块是 **CFI 编译** 的，未定义符号里有 `__cfi_slowpath`；
+#   前几版为了迁就 Ubuntu clang 把 CONFIG_CFI_CLANG 关了，内核不再导出 `__cfi_slowpath`，
+#   厂商模块（含 msm_drm.ko 显示驱动）全部加载失败 → 内核起来了但卡在开机 logo。
+#   所以 v5 恢复原厂配置（LTO/CFI/SCS 全开），只保留 kABI 补丁与 LOCALVERSION 修正。
 #
-#   line —— 原厂配置（LTO/CFI/SCS 关掉，规避非 AOSP clang 的兼容问题）+ ACK 宏
-#   dsp  —— 再加 droidspaces 选项 + venus 专用 kABI padding 补丁
+#   line —— 原厂配置原样（工具链基线）
+#   dsp  —— + droidspaces 选项 + venus 专用 kABI padding 补丁
 
 on:
   workflow_dispatch:
@@ -55,18 +55,8 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          # LOCALVERSION 不要带 dirty 的 "+"
-          python3 - <<'PYEOF'
-          import re
-          p = 'scripts/setlocalversion'
-          s = open(p).read()
-          s2 = re.sub(r'\$\{scm_version:\+\+\}', '', s)
-          if s2 != s:
-              open(p, 'w').write(s2)
-              print('setlocalversion patched')
-          else:
-              print('setlocalversion: pattern not found')
-          PYEOF
+          sed -i 's|res="$res${scm:++}"|res="$res"|' scripts/setlocalversion
+          grep -n 'res="\$res' scripts/setlocalversion || true
           # 所有 CREATE_TRACE_POINTS 的 trace.o 补 -I$(src)
           python3 - <<'PYEOF'
           import os, re
@@ -107,14 +97,11 @@ jobs:
           patch -p1 --verbose < ../patches/001_sysvipc_venus.patch
           patch -p1 --verbose < ../patches/002_posix_mqueue_venus.patch
 
-      - name: Configure
+      - name: Configure (stock config kept as-is)
         run: |
           set -e
           cd k
           cp ../config/device-stock.config .config
-          scripts/config --file .config -d LTO_CLANG -e LTO_NONE
-          scripts/config --file .config -d CFI_CLANG
-          scripts/config --file .config -d SHADOW_CALL_STACK
           scripts/config --file .config -d LOCALVERSION_AUTO
           scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
           if [ "${{ matrix.variant }}" = "dsp" ]; then
@@ -122,7 +109,7 @@ jobs:
           fi
           make ARCH=arm64 olddefconfig
           echo "=== key config ==="
-          grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|LTO|LTO_CLANG|CFI_CLANG|LOCALVERSION|LOCALVERSION_AUTO|CMDLINE|MODVERSIONS)=' .config || true
+          grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|LTO|LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK|LOCALVERSION|LOCALVERSION_AUTO|MODVERSIONS)=' .config || true
 
       - name: Build Image
         run: |
@@ -133,9 +120,31 @@ jobs:
             CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
             OBJCOPY=llvm-objcopy-18 OBJDUMP=llvm-objdump-18 STRIP=llvm-strip-18 \
             HOSTCC=clang-18 HOSTLD=ld.lld-18 HOSTAR=llvm-ar-18 \
+            LLVM_IAS=1 \
             KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
             Image 2>&1 | tee ../build.log
           ls -l arch/arm64/boot/Image
+          echo "=== CFI symbols (必须有) ==="
+          grep -E '__cfi_slowpath(__diag)?$' System.map | head -5 || true
+          if ! grep -q '__cfi_slowpath$' System.map; then
+            echo "::error::__cfi_slowpath missing - CONFIG_CFI_CLANG did not take effect"
+            exit 1
+          fi
+          python3 - <<'PYEOF'
+          p = 'arch/arm64/boot/Image'
+          d = bytearray(open(p, 'rb').read())
+          n = b'5.4.302-qgki-g7ede20c8692e+'
+          c = d.count(n)
+          i = 0
+          while True:
+              i = d.find(n, i)
+              if i < 0:
+                  break
+              d[i + len(n) - 1] = 0
+              i += 1
+          open(p, 'wb').write(bytes(d))
+          print('version "+" occurrences patched:', c)
+          PYEOF
           strings arch/arm64/boot/Image | grep -m2 "Linux version 5.4" || true
 
       - name: Upload Image and logs
