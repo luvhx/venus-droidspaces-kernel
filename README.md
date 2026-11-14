@@ -29,6 +29,8 @@
 | `DroidSpaces-venus-5.4.302-kernel.zip` | TWRP / AK3 卡刷 | `0c54915a2ff6288af8c2baa92d43a464cf3d0f367ab31dffd01daae6bb9787cd` |
 | `Image` | 原厂格式内核 | `5d337dcc241e9a5b4bd0fdb26541bb441e00d3fb11c3e19944268070da9f7f33` |
 
+> **启动失败/进 fastboot？** 旧 `v5.4.302` Release 的 boot 镜像 AVB footer 已清零，部分机器会拒绝启动。请改用 [v5.4.302-test](https://github.com/luvhx/venus-droidspaces-kernel/releases/tag/v5.4.302-test) 里保留 AVB footer 的排查包，步骤见 [TESTING.md](TESTING.md)。
+
 - 内核已内置 SukiSU-Ultra v4.3.0-r2，安装管理器 APK 即可获得 root，不需要 Magisk。
 - boot 镜像基于官方 LineageOS 23.2 `boot.img`，只替换 kernel，ramdisk 逐字节不变。
 - 内核版本：`5.4.302-qgki-g7ede20c8692e`，与官方 `vendor_boot` 模块的 `vermagic` 完全一致。
