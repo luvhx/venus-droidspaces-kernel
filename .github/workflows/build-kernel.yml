@@ -2,13 +2,14 @@ name: build-venus-kernel
 
 # 小米 11（venus）LineageOS 23.2 / 5.4.302 内核构建
 #
-# 目标：尽量复刻 LineageOS 官方构建环境（AOSP clang + 原厂配置），先拿到“能开机”的基线，
-# 再加 droidspaces 选项。
+# 关键点（v4）：
+#   * LineageOS / AOSP 的 kernel build.config 里会传 `-D__ANDROID_COMMON_KERNEL__`，
+#     官方内核因此导出/启用了一批 ACK 专有代码；我们自己 make 时漏掉这个宏，
+#     厂商模块可能因为找不到符号而加载失败 → 卡在开机 logo。v4 补上。
+#   * 其余仍保持：原厂 config、LOCALVERSION 对齐、不带 dirty 的 "+"。
 #
-#   line   —— 纯原厂配置 + AOSP clang（不加任何 droidspaces 选项，验证工具链）
-#   dsp    —— 原厂配置 + droidspaces 选项 + venus 专用 kABI padding 补丁
-#
-# 产出 arch/arm64/boot/Image，本地 tools/repack-boot.py 装回官方 boot.img 后 fastboot 刷入。
+#   line —— 原厂配置（LTO/CFI/SCS 关掉，规避非 AOSP clang 的兼容问题）+ ACK 宏
+#   dsp  —— 再加 droidspaces 选项 + venus 专用 kABI padding 补丁
 
 on:
   workflow_dispatch:
@@ -36,7 +37,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
-            python3 zip unzip cpio kmod device-tree-compiler curl
+            python3 zip unzip cpio kmod device-tree-compiler curl \
+            clang-18 lld-18 llvm-18 gcc-aarch64-linux-gnu
 
       - name: Fetch LineageOS kernel @ 7ede20c8
         run: |
@@ -53,7 +55,7 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          # 让 LOCALVERSION 不含 dirty 的 "+"（否则 vermagic 与 ROM 模块对不上）
+          # LOCALVERSION 不要带 dirty 的 "+"
           python3 - <<'PYEOF'
           import re
           p = 'scripts/setlocalversion'
@@ -63,9 +65,9 @@ jobs:
               open(p, 'w').write(s2)
               print('setlocalversion patched')
           else:
-              print('setlocalversion: pattern not found (check manually)')
+              print('setlocalversion: pattern not found')
           PYEOF
-          # 这棵树里所有 CREATE_TRACE_POINTS 的 trace.c 都依赖 -I$(src)，Makefile 普遍没写
+          # 所有 CREATE_TRACE_POINTS 的 trace.o 补 -I$(src)
           python3 - <<'PYEOF'
           import os, re
           count = 0
@@ -105,30 +107,16 @@ jobs:
           patch -p1 --verbose < ../patches/001_sysvipc_venus.patch
           patch -p1 --verbose < ../patches/002_posix_mqueue_venus.patch
 
-      - name: Fetch AOSP clang (same family as LineageOS build)
-        run: |
-          set -e
-          mkdir -p "$HOME/clang"
-          for v in clang-r563880 clang-r547379 clang-r536225 clang-r522817 clang-r487747c; do
-            url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/$v.tar.gz"
-            echo "trying $v"
-            if curl -fsSL --max-time 600 -o /tmp/clang.tar.gz "$url"; then
-              tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
-              echo "CLANG_VERSION=$v" >> "$GITHUB_ENV"
-              break
-            fi
-          done
-          if [ -z "$CLANG_VERSION" ]; then
-            echo "::error::could not download any AOSP clang prebuilt"
-            exit 1
-          fi
-          "$HOME/clang/bin/clang" --version
-
-      - name: Configure (stock config, unchanged)
+      - name: Configure
         run: |
           set -e
           cd k
           cp ../config/device-stock.config .config
+          scripts/config --file .config -d LTO_CLANG -e LTO_NONE
+          scripts/config --file .config -d CFI_CLANG
+          scripts/config --file .config -d SHADOW_CALL_STACK
+          scripts/config --file .config -d LOCALVERSION_AUTO
+          scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
           if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
           fi
@@ -140,10 +128,12 @@ jobs:
         run: |
           set -e
           cd k
-          export PATH="$HOME/clang/bin:$PATH"
           make -j"$(nproc)" ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
+            OBJCOPY=llvm-objcopy-18 OBJDUMP=llvm-objdump-18 STRIP=llvm-strip-18 \
+            HOSTCC=clang-18 HOSTLD=ld.lld-18 HOSTAR=llvm-ar-18 \
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
             Image 2>&1 | tee ../build.log
           ls -l arch/arm64/boot/Image
           strings arch/arm64/boot/Image | grep -m2 "Linux version 5.4" || true
