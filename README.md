@@ -15,6 +15,7 @@
 | TWRP（3.7.0_11-0-venus） | [下载页](https://dl.twrp.me/venus/) · [官方说明](https://twrp.me/xiaomi/xiaomimi11.html) |
 | SukiSU 管理器（v4.3.0-r2） | [APK 直链](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases/download/v4.3.0-r2/SukiSU_v4.3.0-r2_41150-release.apk) · [Releases](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases) |
 | 本内核下载 | [Releases](https://github.com/luvhx/venus-droidspaces-kernel/releases/latest) |
+| 启动失败排查包 | [v5.4.302-test](https://github.com/luvhx/venus-droidspaces-kernel/releases/tag/v5.4.302-test) · [TESTING.md](TESTING.md) |
 | DroidSpaces | <https://github.com/ravindu644/Droidspaces-OSS/releases/latest> |
 
 > ROM SHA-256：`ee286eb38b83c457fc105ded828605d3fe709eb52741f25439f7ad5ed0eae6ab`  
