@@ -2,14 +2,17 @@ name: build-venus-kernel
 
 # 小米 11（venus）LineageOS 23.2 / 5.4.302 内核构建
 #
-# v5 关键修正（静态分析 vendor_boot 里的厂商模块得到的结论）：
-#   厂商模块是 **CFI 编译** 的，未定义符号里有 `__cfi_slowpath`；
-#   前几版为了迁就 Ubuntu clang 把 CONFIG_CFI_CLANG 关了，内核不再导出 `__cfi_slowpath`，
-#   厂商模块（含 msm_drm.ko 显示驱动）全部加载失败 → 内核起来了但卡在开机 logo。
-#   所以 v5 恢复原厂配置（LTO/CFI/SCS 全开），只保留 kABI 补丁与 LOCALVERSION 修正。
+# v7 的核心结论（来自对官方 vendor_boot 里厂商模块的静态分析）：
+#   厂商模块是用 CFI 编译的，未定义符号里带 `__cfi_slowpath`
+#   （msm_drm.ko / fts_touch_spi.ko / xiaomi_touch.ko 等都依赖它）。
+#   内核一旦不带 CONFIG_CFI_CLANG 就不导出该符号 → 模块全部加载失败 → 卡在开机 logo。
+#   用非 AOSP clang 开 LTO+CFI 又容易产出起不来的内核，因此这里：
+#     * 关掉 CFI/LTO（保证能编译、能启动）
+#     * 补一个 `__cfi_slowpath` / `__cfi_slowpath_diag` 的 stub 并 EXPORT_SYMBOL
+#   这样厂商模块就能正常加载。
 #
-#   line —— 原厂配置原样（工具链基线）
-#   dsp  —— + droidspaces 选项 + venus 专用 kABI padding 补丁
+#   line —— 原厂配置（仅上述 CFI 处理），工具链基线
+#   dsp  —— 再加 droidspaces 选项 + venus 专用 kABI padding 补丁
 
 on:
   workflow_dispatch:
@@ -56,8 +59,6 @@ jobs:
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           sed -i 's|res="$res${scm:++}"|res="$res"|' scripts/setlocalversion
-          grep -n 'res="\$res' scripts/setlocalversion || true
-          # 所有 CREATE_TRACE_POINTS 的 trace.o 补 -I$(src)
           python3 - <<'PYEOF'
           import os, re
           count = 0
@@ -88,6 +89,18 @@ jobs:
                   count += 1
           print('trace CFLAGS patched:', count)
           PYEOF
+          # 厂商模块需要 __cfi_slowpath，CFI 关掉时补一个 stub
+          cat > kernel/cfi_stub.c <<'CEOF'
+          #include <linux/types.h>
+          #include <linux/export.h>
+
+          void __cfi_slowpath(u64 typeid, const void *ptr) { }
+          EXPORT_SYMBOL(__cfi_slowpath);
+
+          void __cfi_slowpath_diag(u64 typeid, const void *ptr, void *diag) { }
+          EXPORT_SYMBOL(__cfi_slowpath_diag);
+          CEOF
+          grep -q 'cfi_stub.o' kernel/Makefile || echo 'obj-y += cfi_stub.o' >> kernel/Makefile
 
       - name: Apply droidspaces kABI patches
         if: matrix.variant == 'dsp'
@@ -97,18 +110,19 @@ jobs:
           patch -p1 --verbose < ../patches/001_sysvipc_venus.patch
           patch -p1 --verbose < ../patches/002_posix_mqueue_venus.patch
 
-      - name: Configure (stock config kept as-is)
+      - name: Configure
         run: |
           set -e
           cd k
           cp ../config/device-stock.config .config
+          scripts/config --file .config -d LTO_CLANG -e LTO_NONE
+          scripts/config --file .config -d CFI_CLANG
+          scripts/config --file .config -d SHADOW_CALL_STACK
           scripts/config --file .config -d LOCALVERSION_AUTO
           scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
           if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
           fi
-          # 注意：olddefconfig 也必须用同一套 clang，否则 CC_IS_CLANG 探测失败，
-          # CONFIG_LTO_CLANG / CONFIG_CFI_CLANG 会被 Kconfig 悄悄关掉
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
@@ -117,8 +131,8 @@ jobs:
             LLVM_IAS=1 \
             KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
             olddefconfig
-          if ! grep -q '^CONFIG_CFI_CLANG=y' .config; then
-            echo "::error::CONFIG_CFI_CLANG lost during olddefconfig"
+          if grep -q '^CONFIG_CFI_CLANG=y' .config; then
+            echo "::error::CONFIG_CFI_CLANG unexpectedly enabled"
             exit 1
           fi
           echo "=== key config ==="
@@ -137,10 +151,10 @@ jobs:
             KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
             Image 2>&1 | tee ../build.log
           ls -l arch/arm64/boot/Image
-          echo "=== CFI symbols (必须有) ==="
-          grep -E '__cfi_slowpath(__diag)?$' System.map | head -5 || true
+          echo "=== cfi stub export check ==="
+          grep -E '__cfi_slowpath(__diag)?$' System.map || true
           if ! grep -q '__cfi_slowpath$' System.map; then
-            echo "::error::__cfi_slowpath missing - CONFIG_CFI_CLANG did not take effect"
+            echo "::error::__cfi_slowpath not exported"
             exit 1
           fi
           python3 - <<'PYEOF'
