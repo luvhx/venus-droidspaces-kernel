@@ -1,11 +1,14 @@
 name: build-venus-kernel
 
-# 构建小米 11（venus）LineageOS 23.2 / 5.4.302 内核，用于 DroidSpaces 适配验证。
+# 小米 11（venus）LineageOS 23.2 / 5.4.302 内核构建
 #
-#   stock —— 设备原厂配置原样（只关 LTO/CFI/SCS，用来验证“构建管线本身能产出可开机内核”）
-#   dsp   —— + droidspaces 选项 + venus 专用 kABI padding 补丁（SYSVIPC / POSIX_MQUEUE）
+# 目标：尽量复刻 LineageOS 官方构建环境（AOSP clang + 原厂配置），先拿到“能开机”的基线，
+# 再加 droidspaces 选项。
 #
-# 产出 arch/arm64/boot/Image，本地用 tools/repack-boot.py 装回官方 boot.img 后 fastboot 刷入。
+#   line   —— 纯原厂配置 + AOSP clang（不加任何 droidspaces 选项，验证工具链）
+#   dsp    —— 原厂配置 + droidspaces 选项 + venus 专用 kABI padding 补丁
+#
+# 产出 arch/arm64/boot/Image，本地 tools/repack-boot.py 装回官方 boot.img 后 fastboot 刷入。
 
 on:
   workflow_dispatch:
@@ -14,7 +17,7 @@ on:
     paths:
       - '.github/workflows/build-kernel.yml'
       - 'patches/**'
-      - 'config/droidspaces-gki.config'
+      - 'config/**'
 
 jobs:
   build:
@@ -23,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [stock, dsp]
+        variant: [line, dsp]
 
     steps:
       - name: Checkout config repo
@@ -33,8 +36,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
-            python3 zip unzip cpio kmod device-tree-compiler \
-            clang-18 lld-18 llvm-18 gcc-aarch64-linux-gnu
+            python3 zip unzip cpio kmod device-tree-compiler curl
 
       - name: Fetch LineageOS kernel @ 7ede20c8
         run: |
@@ -51,10 +53,19 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          # 这棵树里所有 CREATE_TRACE_POINTS 的 trace.c 都依赖 -I$(src) 才能解析
-          # '#include "./xxx-trace.h"'，但 Makefile 普遍没写，会报
-          #   include/trace/define_trace.h:95: fatal error: './trace.h' file not found
-          # 这里一次性给所有命中的 Makefile 补上 CFLAGS_<obj> := -I$(src)
+          # 让 LOCALVERSION 不含 dirty 的 "+"（否则 vermagic 与 ROM 模块对不上）
+          python3 - <<'PYEOF'
+          import re
+          p = 'scripts/setlocalversion'
+          s = open(p).read()
+          s2 = re.sub(r'\$\{scm_version:\+\+\}', '', s)
+          if s2 != s:
+              open(p, 'w').write(s2)
+              print('setlocalversion patched')
+          else:
+              print('setlocalversion: pattern not found (check manually)')
+          PYEOF
+          # 这棵树里所有 CREATE_TRACE_POINTS 的 trace.c 都依赖 -I$(src)，Makefile 普遍没写
           python3 - <<'PYEOF'
           import os, re
           count = 0
@@ -83,8 +94,7 @@ jobs:
                   with open(mk, 'a') as fh:
                       fh.write('\nCFLAGS_%s := -I$(src)\n' % obj)
                   count += 1
-                  print('patched', mk, obj)
-          print('total patched:', count)
+          print('trace CFLAGS patched:', count)
           PYEOF
 
       - name: Apply droidspaces kABI patches
@@ -95,37 +105,45 @@ jobs:
           patch -p1 --verbose < ../patches/001_sysvipc_venus.patch
           patch -p1 --verbose < ../patches/002_posix_mqueue_venus.patch
 
-      - name: Configure
+      - name: Fetch AOSP clang (same family as LineageOS build)
+        run: |
+          set -e
+          mkdir -p "$HOME/clang"
+          for v in clang-r563880 clang-r547379 clang-r536225 clang-r522817 clang-r487747c; do
+            url="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/$v.tar.gz"
+            echo "trying $v"
+            if curl -fsSL --max-time 600 -o /tmp/clang.tar.gz "$url"; then
+              tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
+              echo "CLANG_VERSION=$v" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+          if [ -z "$CLANG_VERSION" ]; then
+            echo "::error::could not download any AOSP clang prebuilt"
+            exit 1
+          fi
+          "$HOME/clang/bin/clang" --version
+
+      - name: Configure (stock config, unchanged)
         run: |
           set -e
           cd k
           cp ../config/device-stock.config .config
-          # 关掉 LTO/CFI/SCS：不改符号 CRC，但高度依赖编译器版本，
-          # 用非 AOSP clang 构建时最容易在这里产出起不来的内核。
-          scripts/config --file .config -d LTO_CLANG -e LTO_NONE
-          scripts/config --file .config -d CFI_CLANG
-          scripts/config --file .config -d SHADOW_CALL_STACK
-          # 与 ROM 的 vermagic 对齐
-          scripts/config --file .config -d LOCALVERSION_AUTO
-          scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
-          # earlycon=efi：失败时手机屏幕能看到早期内核日志
-          scripts/config --file .config --set-str CMDLINE "cgroup_disable=pressure earlycon=efi loglevel=7 ignore_loglevel"
           if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
           fi
           make ARCH=arm64 olddefconfig
           echo "=== key config ==="
-          grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|VETH|BRIDGE|LTO|LTO_CLANG|CFI_CLANG|LOCALVERSION|LOCALVERSION_AUTO|CMDLINE)=' .config || true
+          grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|LTO|LTO_CLANG|CFI_CLANG|LOCALVERSION|LOCALVERSION_AUTO|CMDLINE|MODVERSIONS)=' .config || true
 
       - name: Build Image
         run: |
           set -e
           cd k
+          export PATH="$HOME/clang/bin:$PATH"
           make -j"$(nproc)" ARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
-            OBJCOPY=llvm-objcopy-18 OBJDUMP=llvm-objdump-18 STRIP=llvm-strip-18 \
-            HOSTCC=clang-18 HOSTLD=ld.lld-18 HOSTAR=llvm-ar-18 \
             Image 2>&1 | tee ../build.log
           ls -l arch/arm64/boot/Image
           strings arch/arm64/boot/Image | grep -m2 "Linux version 5.4" || true
@@ -141,4 +159,5 @@ jobs:
             k/System.map
             build.log
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 14
