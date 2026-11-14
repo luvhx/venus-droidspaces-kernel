@@ -1,12 +1,11 @@
 name: build-venus-kernel
 
 # 构建小米 11（venus）LineageOS 23.2 / 5.4.302 内核，用于 DroidSpaces 适配验证。
-# 一次运行会并行产出 4 个变体：
-#   stock   —— 纯设备原厂配置（只关 LTO/CFI，用来验证构建管线本身能产出可开机内核）
-#   dsp123  —— + droidspaces 选项 + sysvipc kABI 补丁变体 1_2_3
-#   dsp345  —— + droidspaces 选项 + sysvipc kABI 补丁变体 3_4_5
-#   dsp678  —— + droidspaces 选项 + sysvipc kABI 补丁变体 6_7_8（官方推荐首选）
-# 其余两个环境变量保持与 ROM 一致：vermagic 5.4.302-qgki-g7ede20c8692e。
+#
+#   stock —— 设备原厂配置原样（只关 LTO/CFI/SCS，用来验证“构建管线本身能产出可开机内核”）
+#   dsp   —— + droidspaces 选项 + venus 专用 kABI padding 补丁（SYSVIPC / POSIX_MQUEUE）
+#
+# 产出 arch/arm64/boot/Image，本地用 tools/repack-boot.py 装回官方 boot.img 后 fastboot 刷入。
 
 on:
   workflow_dispatch:
@@ -14,6 +13,8 @@ on:
     branches: [ master ]
     paths:
       - '.github/workflows/build-kernel.yml'
+      - 'patches/**'
+      - 'config/droidspaces-gki.config'
 
 jobs:
   build:
@@ -22,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [stock, dsp123, dsp345, dsp678]
+        variant: [stock, dsp]
 
     steps:
       - name: Checkout config repo
@@ -50,36 +51,35 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # venus 的 WALT trace.c 依赖 -I$(src)，上游 Makefile 里没有，补一行，
+          # 否则会报 include/trace/define_trace.h:95: fatal error: './trace.h' file not found
+          grep -q 'CFLAGS_trace.o' kernel/sched/walt/Makefile || \
+            echo 'CFLAGS_trace.o := -I$(src)' >> kernel/sched/walt/Makefile
 
       - name: Apply droidspaces kABI patches
-        if: matrix.variant != 'stock'
+        if: matrix.variant == 'dsp'
         run: |
           set -e
           cd k
-          case "${{ matrix.variant }}" in
-            dsp123) P=001.GKI-below-6.12-fix_sysvipc_kabi_1_2_3.patch ;;
-            dsp345) P=001.GKI-below-6.12-fix_sysvipc_kabi_3_4_5.patch ;;
-            dsp678) P=001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch ;;
-          esac
-          patch -p1 --verbose < "../patches/$P"
-          patch -p1 --verbose < "../patches/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
+          patch -p1 --verbose < ../patches/001_sysvipc_venus.patch
+          patch -p1 --verbose < ../patches/002_posix_mqueue_venus.patch
 
       - name: Configure
         run: |
           set -e
           cd k
           cp ../config/device-stock.config .config
-          # 关掉 LTO/CFI/SCS：这几个开关对符号 CRC 没有影响，但高度依赖编译器版本，
-          # 历史上用非 AOSP clang 构建时最容易在这里产出起不来的内核。
+          # 关掉 LTO/CFI/SCS：不改符号 CRC，但高度依赖编译器版本，
+          # 用非 AOSP clang 构建时最容易在这里产出起不来的内核。
           scripts/config --file .config -d LTO_CLANG -e LTO_NONE
           scripts/config --file .config -d CFI_CLANG
           scripts/config --file .config -d SHADOW_CALL_STACK
           # 与 ROM 的 vermagic 对齐
           scripts/config --file .config -d LOCALVERSION_AUTO
           scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
-          # 打开早期串口/EFI 控制台，失败时手机屏幕能看到 early printk
+          # earlycon=efi：失败时手机屏幕能看到早期内核日志
           scripts/config --file .config --set-str CMDLINE "cgroup_disable=pressure earlycon=efi loglevel=7 ignore_loglevel"
-          if [ "${{ matrix.variant }}" != "stock" ]; then
+          if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
           fi
           make ARCH=arm64 olddefconfig
