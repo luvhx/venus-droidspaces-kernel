@@ -107,7 +107,20 @@ jobs:
           if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
           fi
-          make ARCH=arm64 olddefconfig
+          # 注意：olddefconfig 也必须用同一套 clang，否则 CC_IS_CLANG 探测失败，
+          # CONFIG_LTO_CLANG / CONFIG_CFI_CLANG 会被 Kconfig 悄悄关掉
+          make ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
+            OBJCOPY=llvm-objcopy-18 OBJDUMP=llvm-objdump-18 STRIP=llvm-strip-18 \
+            HOSTCC=clang-18 HOSTLD=ld.lld-18 HOSTAR=llvm-ar-18 \
+            LLVM_IAS=1 \
+            KCFLAGS="-D__ANDROID_COMMON_KERNEL__" \
+            olddefconfig
+          if ! grep -q '^CONFIG_CFI_CLANG=y' .config; then
+            echo "::error::CONFIG_CFI_CLANG lost during olddefconfig"
+            exit 1
+          fi
           echo "=== key config ==="
           grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|LTO|LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK|LOCALVERSION|LOCALVERSION_AUTO|MODVERSIONS)=' .config || true
 
