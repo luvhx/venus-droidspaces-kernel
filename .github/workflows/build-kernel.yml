@@ -51,10 +51,41 @@ jobs:
           git checkout -q FETCH_HEAD
           git log --oneline -1
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          # venus 的 WALT trace.c 依赖 -I$(src)，上游 Makefile 里没有，补一行，
-          # 否则会报 include/trace/define_trace.h:95: fatal error: './trace.h' file not found
-          grep -q 'CFLAGS_trace.o' kernel/sched/walt/Makefile || \
-            echo 'CFLAGS_trace.o := -I$(src)' >> kernel/sched/walt/Makefile
+          # 这棵树里所有 CREATE_TRACE_POINTS 的 trace.c 都依赖 -I$(src) 才能解析
+          # '#include "./xxx-trace.h"'，但 Makefile 普遍没写，会报
+          #   include/trace/define_trace.h:95: fatal error: './trace.h' file not found
+          # 这里一次性给所有命中的 Makefile 补上 CFLAGS_<obj> := -I$(src)
+          python3 - <<'PYEOF'
+          import os, re
+          count = 0
+          for root, dirs, files in os.walk('.'):
+              if '/.git' in root:
+                  continue
+              for f in files:
+                  if not f.endswith('.c'):
+                      continue
+                  src = os.path.join(root, f)
+                  try:
+                      text = open(src, errors='ignore').read()
+                  except OSError:
+                      continue
+                  if 'CREATE_TRACE_POINTS' not in text:
+                      continue
+                  obj = f[:-2] + '.o'
+                  mk = os.path.join(root, 'Makefile')
+                  if not os.path.exists(mk):
+                      continue
+                  mtext = open(mk, errors='ignore').read()
+                  if 'CFLAGS_' + obj in mtext:
+                      continue
+                  if not re.search(r'\b' + re.escape(obj) + r'\b', mtext):
+                      continue
+                  with open(mk, 'a') as fh:
+                      fh.write('\nCFLAGS_%s := -I$(src)\n' % obj)
+                  count += 1
+                  print('patched', mk, obj)
+          print('total patched:', count)
+          PYEOF
 
       - name: Apply droidspaces kABI patches
         if: matrix.variant == 'dsp'
