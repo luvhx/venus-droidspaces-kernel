@@ -1,0 +1,113 @@
+name: build-venus-kernel
+
+# 构建小米 11（venus）LineageOS 23.2 / 5.4.302 内核，用于 DroidSpaces 适配验证。
+# 一次运行会并行产出 4 个变体：
+#   stock   —— 纯设备原厂配置（只关 LTO/CFI，用来验证构建管线本身能产出可开机内核）
+#   dsp123  —— + droidspaces 选项 + sysvipc kABI 补丁变体 1_2_3
+#   dsp345  —— + droidspaces 选项 + sysvipc kABI 补丁变体 3_4_5
+#   dsp678  —— + droidspaces 选项 + sysvipc kABI 补丁变体 6_7_8（官方推荐首选）
+# 其余两个环境变量保持与 ROM 一致：vermagic 5.4.302-qgki-g7ede20c8692e。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/build-kernel.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [stock, dsp123, dsp345, dsp678]
+
+    steps:
+      - name: Checkout config repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
+            python3 zip unzip cpio kmod device-tree-compiler \
+            clang-18 lld-18 llvm-18 gcc-aarch64-linux-gnu
+
+      - name: Fetch LineageOS kernel @ 7ede20c8
+        run: |
+          set -e
+          git init -q k
+          cd k
+          git remote add origin https://github.com/LineageOS/android_kernel_xiaomi_sm8350.git
+          if git fetch -q --depth=1 origin 7ede20c8692e0e0fc044754429e33cfd1d75c40d; then
+            echo "fetched exact commit"
+          else
+            echo "::warning::exact sha fetch failed, falling back to lineage-23.2 tip"
+            git fetch -q --depth=1 origin lineage-23.2
+          fi
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+          echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Apply droidspaces kABI patches
+        if: matrix.variant != 'stock'
+        run: |
+          set -e
+          cd k
+          case "${{ matrix.variant }}" in
+            dsp123) P=001.GKI-below-6.12-fix_sysvipc_kabi_1_2_3.patch ;;
+            dsp345) P=001.GKI-below-6.12-fix_sysvipc_kabi_3_4_5.patch ;;
+            dsp678) P=001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch ;;
+          esac
+          patch -p1 --verbose < "../patches/$P"
+          patch -p1 --verbose < "../patches/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch"
+
+      - name: Configure
+        run: |
+          set -e
+          cd k
+          cp ../config/device-stock.config .config
+          # 关掉 LTO/CFI/SCS：这几个开关对符号 CRC 没有影响，但高度依赖编译器版本，
+          # 历史上用非 AOSP clang 构建时最容易在这里产出起不来的内核。
+          scripts/config --file .config -d LTO_CLANG -e LTO_NONE
+          scripts/config --file .config -d CFI_CLANG
+          scripts/config --file .config -d SHADOW_CALL_STACK
+          # 与 ROM 的 vermagic 对齐
+          scripts/config --file .config -d LOCALVERSION_AUTO
+          scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
+          # 打开早期串口/EFI 控制台，失败时手机屏幕能看到 early printk
+          scripts/config --file .config --set-str CMDLINE "cgroup_disable=pressure earlycon=efi loglevel=7 ignore_loglevel"
+          if [ "${{ matrix.variant }}" != "stock" ]; then
+            cat ../config/droidspaces-gki.config >> .config
+          fi
+          make ARCH=arm64 olddefconfig
+          echo "=== key config ==="
+          grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|VETH|BRIDGE|LTO|LTO_CLANG|CFI_CLANG|LOCALVERSION|LOCALVERSION_AUTO|CMDLINE)=' .config || true
+
+      - name: Build Image
+        run: |
+          set -e
+          cd k
+          make -j"$(nproc)" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang-18 LD=ld.lld-18 AR=llvm-ar-18 NM=llvm-nm-18 \
+            OBJCOPY=llvm-objcopy-18 OBJDUMP=llvm-objdump-18 STRIP=llvm-strip-18 \
+            HOSTCC=clang-18 HOSTLD=ld.lld-18 HOSTAR=llvm-ar-18 \
+            Image 2>&1 | tee ../build.log
+          ls -l arch/arm64/boot/Image
+          strings arch/arm64/boot/Image | grep -m2 "Linux version 5.4" || true
+
+      - name: Upload Image and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-kernel-${{ matrix.variant }}
+          path: |
+            k/arch/arm64/boot/Image
+            k/.config
+            k/System.map
+            build.log
+          if-no-files-found: warn
+          retention-days: 14
