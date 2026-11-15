@@ -1,3 +1,5 @@
+﻿# NOTE: 这套脚本用 Debian clang 构建，产出的内核无法在 venus 上启动（缺 CFI，厂商模块加载失败）。
+# 可用的构建方式见 .github/workflows/build-kernel.yml（AOSP clang + 原厂配置）。
 export W="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export L=$W/toolchain21
 export LD_LIBRARY_PATH=$L/usr/lib/aarch64-linux-gnu:$L/usr/lib/llvm-21/lib:$L/lib/aarch64-linux-gnu:$W/toolchain/usr/lib/aarch64-linux-gnu:$W/toolchain/usr/lib:$W/toolchain/lib/aarch64-linux-gnu:$W/toolchain/lib

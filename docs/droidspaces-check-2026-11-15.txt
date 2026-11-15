@@ -1,0 +1,55 @@
+
+Droidspaces v7.2.0 - Checking system requirements...
+
+[MUST HAVE]
+These features are required for Droidspaces to work:
+
+  [✓] Root privileges
+  [✓] Linux version
+  [✓] PID namespace
+  [✓] Mount namespace
+  [✓] UTS namespace
+  [✓] IPC namespace
+  [✓] pivot_root syscall
+  [✓] /proc filesystem
+  [✓] /sys filesystem
+  [✓] Seccomp support
+
+[RECOMMENDED]
+These features improve functionality but are not strictly required:
+
+  [✓] epoll support
+  [✓] signalfd support
+  [✓] PTY support
+  [✓] devpts support
+  [✓] Loop device
+  [✓] ext4 filesystem
+  [✓] Cgroup v2 support
+  [✓] Cgroup namespace
+  [✓] New mount API
+  [✓] devtmpfs support
+
+[OPTIONAL]
+These features are optional and only used for specific functionality:
+
+  [✓] FUSE support
+  [✓] TUN/TAP support
+  [✓] OverlayFS support
+  [✓] Network namespace
+  [✓] Bridge device support
+  [✓] Veth pair support
+  [✓] Macvlan support
+  [✓] IPv6 NAT support
+  [✓] Memory limit support
+  [✓] Swap limit support
+  [✗] CPU limit support
+      CONFIG_CFS_BANDWIDTH, and no cgroup_disable=cpu on the kernel command line; --cpus is skipped if absent
+  [✓] CPU usage accounting
+  [✗] Process limit support
+      CONFIG_CGROUP_PIDS, and no cgroup_disable=pids on the kernel command line; --pids-limit is skipped if absent
+  [✓] Sandboxing (user namespaces)
+
+Summary:
+
+  [✓] All required features found!
+
