@@ -147,12 +147,24 @@ jobs:
           scripts/config --file .config --set-str LOCALVERSION "-qgki-g7ede20c8692e"
           if [ "${{ matrix.variant }}" = "dsp" ]; then
             cat ../config/droidspaces-gki.config >> .config
+            # nftables / br_netfilter 等 Docker 需要的选项（对 kABI 无影响）
+            cat ../config/docker-host.config >> .config
           fi
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 \
             KCFLAGS="-D__ANDROID_COMMON_KERNEL__" olddefconfig
           if ! grep -q '^CONFIG_CFI_CLANG=y' .config; then
             echo "::error::CONFIG_CFI_CLANG lost during olddefconfig"
             exit 1
+          fi
+          if [ "${{ matrix.variant }}" = "dsp" ]; then
+            if ! grep -q '^CONFIG_NF_TABLES=y' .config; then
+              echo "::error::CONFIG_NF_TABLES not enabled"
+              exit 1
+            fi
+            if ! grep -q '^CONFIG_BRIDGE_NETFILTER=y' .config; then
+              echo "::error::CONFIG_BRIDGE_NETFILTER not enabled"
+              exit 1
+            fi
           fi
           echo "=== key config ==="
           grep -E '^CONFIG_(SYSVIPC|IPC_NS|PID_NS|POSIX_MQUEUE|USER_NS|DEVTMPFS|OVERLAY_FS|NET_NS|LTO|LTO_CLANG|CFI_CLANG|SHADOW_CALL_STACK|LOCALVERSION|LOCALVERSION_AUTO|MODVERSIONS)=' .config || true
