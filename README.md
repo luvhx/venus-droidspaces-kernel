@@ -113,3 +113,41 @@ source env21.sh
 ```
 
 详细配置和验证方法见 `config/` 与 `tools/check_kabi.sh`；SukiSU 集成使用 `drivers/kernelsu/`，配置为 `CONFIG_KSU=y`、`CONFIG_KSU_MANUAL_SU=y`。
+
+---
+
+## 实测结果（2026-11-15，真机 venus）
+
+内核：`5.4.302-qgki-g7ede20c8692e`（构建时间 `Sat Nov 14 21:15:30 UTC 2026`），
+`CONFIG_CFI_CLANG=y` + `CONFIG_LTO_CLANG=y` + droidspaces kABI padding 补丁。
+
+`droidspaces check`（v7.2.0）：
+
+- **MUST HAVE：全部 ✓**（root、PID/Mount/UTS/IPC namespace、pivot_root、/proc、/sys、Seccomp）
+- **RECOMMENDED：全部 ✓**（epoll、signalfd、PTY、devpts、loop、ext4、cgroup v2、cgroup ns、new mount API、devtmpfs）
+- **OPTIONAL：除 CPU 限制（CFS_BANDWIDTH）与进程限制（CGROUP_PIDS）外全部 ✓**（这两项会破坏 kABI，保持关闭）
+
+容器实测：
+
+```text
+$ droidspaces start -n alpine -r /data/local/Droidspaces/rootfs/alpine --net=none
+[+] Container started with PID 6258 ... OS: Alpine Linux v3.20
+$ droidspaces -n alpine run -- /bin/sh -c 'uname -a; head -2 /etc/os-release'
+Linux alpine 5.4.302-qgki-g7ede20c8692e #1 SMP PREEMPT Sat Nov 14 21:15:30 UTC 2026 aarch64 Linux
+NAME="Alpine Linux"
+ID=alpine
+```
+
+### 能开机的构建配方（关键）
+
+之前几版内核"能编译但起不来"，根因是厂商模块（`msm_drm.ko`、`fts_touch_spi.ko`、`xiaomi_touch.ko` 等）
+是 **CFI 编译**的，未定义符号里有 `__cfi_slowpath`；内核若不带 `CONFIG_CFI_CLANG` 就不导出该符号，
+模块全部加载失败 → 卡在开机 logo。因此必须：
+
+1. 用 **AOSP prebuilt clang**（本次为 `clang-r547379`，clang 20.0.0）而不是发行版 clang；
+2. **保留原厂配置原样**：`CONFIG_LTO_CLANG=y`、`CONFIG_CFI_CLANG=y`、`CONFIG_SHADOW_CALL_STACK=y`；
+3. 传 `-D__ANDROID_COMMON_KERNEL__`（LineageOS `build.config.common` 同样会传）；
+4. 只额外加 droidspaces 选项与 venus 专用 kABI padding 补丁，`LOCALVERSION` 对齐 ROM 的 vermagic。
+
+完整 CI 见 `.github/workflows/build-kernel.yml`（workflow v8），
+构建产物用 `tools/repack-boot.py` 装回官方 `boot.img` 后 `fastboot flash boot` 即可。
