@@ -25,7 +25,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [brnf, nft]
+        # dsp  = 出货内核（v8：原厂配置 + droidspaces 选项 + venus kABI 补丁，已真机验证可开机）
+        # brnf = 实验：额外开 BRIDGE_NETFILTER（当前会导致引导卡死，仅备查）
+        # nft  = 实验：额外开 NF_TABLES（同上）
+        variant: [dsp, brnf, nft]
 
     steps:
       - name: Checkout config repo

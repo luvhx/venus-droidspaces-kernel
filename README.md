@@ -75,6 +75,21 @@ fastboot reboot
 
 预期：MUST / RECOMMENDED 全部通过；`--cpus`、`--pids-limit` 不可用（原因见下）。
 
+## Docker / 1Panel（容器内）
+
+Docker 可以正常跑，但**必须把 iptables 切到 legacy 后端**（本内核没编 `CONFIG_NF_TABLES`，
+Debian 12 默认的 `iptables-nft` 会报 `Could not fetch rule set generation id`，dockerd 直接退出）：
+
+```bash
+# 容器内
+update-alternatives --set iptables  /usr/sbin/iptables-legacy
+update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+systemctl restart docker
+```
+
+验证通过的版本：Docker 29.9.3，`driver=overlayfs`、`cgroup=systemd/v2`。
+细节与内核侧实验记录见 [docs/DOCKER-NOTES.md](docs/DOCKER-NOTES.md)。
+
 ## 说明与限制
 
 - 本内核只匹配 **LineageOS 23.2 / 5.4.302 / 内核 commit `7ede20c8`**；刷到 22.2、其它 ROM 或 HyperOS 会因模块
@@ -83,6 +98,8 @@ fastboot reboot
   `--pids-limit` 不可用；其余 DroidSpaces 必需项均满足。
 - **必须用 AOSP prebuilt clang 编译并保留 `CONFIG_CFI_CLANG=y`**：厂商模块（`msm_drm.ko`、`fts_touch_spi.ko` 等）
   依赖 `__cfi_slowpath`，关掉 CFI 会全部加载失败、卡在开机 logo。构建配方见 [验证记录](docs/VERIFIED-2026-11-15.md)。
+- 没开 `CONFIG_NF_TABLES` / `CONFIG_BRIDGE_NETFILTER`：nft 与 br_netfilter 用不了（Docker 走 legacy 即可）；
+  试着补开这两项会导致**引导卡死**，已确认不是体积/工具链/ABI 问题，详见 [docs/DOCKER-NOTES.md](docs/DOCKER-NOTES.md)。
 - 解锁 bootloader 才能刷；不要重新锁 BL。
 
 ## 编译
